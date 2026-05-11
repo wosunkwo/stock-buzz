@@ -1,0 +1,51 @@
+# === Secrets — never commit ==================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*credentials*
+
+# === Python ===================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Data + generated output ==================================================
+# These are runtime artifacts. Empty `data/` and `output/` dirs are kept via
+# .gitkeep so the project structure clones cleanly.
+data/*
+!data/.gitkeep
+output/*
+!output/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# === OS =======================================================================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# === IDE / editor =============================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# === Local-only AWS or system files ==========================================
+.aws/
