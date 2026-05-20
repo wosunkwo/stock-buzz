@@ -130,9 +130,11 @@ def serve_report():
 
 _ALLOWED_MODELS = {
     "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
-    "claude-opus-4-6", "auto",
+    "claude-opus-4-6",
+    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
+    "auto",
 }
-_ALLOWED_PROVIDERS = {"anthropic", "bedrock", "none", "auto"}
+_ALLOWED_PROVIDERS = {"anthropic", "bedrock", "gemini", "none", "auto"}
 
 
 @app.post("/refresh")
@@ -277,10 +279,15 @@ def summarize_one(ticker: str):
 
     if model in ("", "auto"):
         resolved_model = _resolve_model(provider)
-    elif model in {"claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"}:
+    elif model in _ALLOWED_MODELS - {"auto"}:
         resolved_model = _resolve_model(provider, override=model)
     else:
         return jsonify({"error": f"unknown model: {model}"}), 400
+
+    # Auto-detect Gemini provider from model name so callers don't need to
+    # send provider explicitly when using on-demand summarize.
+    if resolved_model.startswith("gemini"):
+        provider = "gemini"
 
     # Find the TickerBuzz entry. Most tickers will be in the latest scrape;
     # if not, we synthesize a placeholder so the LLM still has something to
@@ -383,10 +390,13 @@ def metrics_explain(ticker: str):
 
     if model in ("", "auto"):
         resolved_model = _resolve_model(provider)
-    elif model in {"claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"}:
+    elif model in _ALLOWED_MODELS - {"auto"}:
         resolved_model = _resolve_model(provider, override=model)
     else:
         return jsonify({"error": f"unknown model: {model}"}), 400
+
+    if resolved_model.startswith("gemini"):
+        provider = "gemini"
 
     md_lookup = fetch_market_data([ticker], verbose=False)
     md = md_lookup.get(ticker)

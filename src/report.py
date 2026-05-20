@@ -31,6 +31,7 @@ from .metrics_explainer import (
     METRIC_LABELS, _collect_metric_values,
     _fingerprint as _metrics_fingerprint,
     _get_cached as _get_cached_metrics_explanation,
+    init_explanations_table as _init_explanations_table,
 )
 from .scoring import TickerBuzz
 from .sectors import group_by_sector
@@ -829,7 +830,10 @@ TEMPLATE = """<!DOCTYPE html>
     <option value="auto">Model: Auto (server default)</option>
     <option value="claude-opus-4-7">Opus 4.7 (best quality, ~$0.10/run)</option>
     <option value="claude-sonnet-4-6">Sonnet 4.6 (balanced, ~$0.02/run)</option>
-    <option value="claude-haiku-4-5">Haiku 4.5 (cheapest, ~$0.005/run)</option>
+    <option value="claude-haiku-4-5">Haiku 4.5 (~$0.005/run)</option>
+    <option value="gemini-2.5-pro">Gemini 2.5 Pro (~$0.06/run)</option>
+    <option value="gemini-2.5-flash">Gemini 2.5 Flash (~$0.008/run)</option>
+    <option value="gemini-2.0-flash">Gemini 2.0 Flash (~$0.004/run)</option>
     <option value="none">No AI (fastest, free)</option>
   </select>
   <button class="refresh-btn" id="refresh-btn" title="Re-run pipeline in the background">
@@ -935,7 +939,7 @@ TEMPLATE = """<!DOCTYPE html>
 </main>
 
 <footer>
-  Phase 2 prototype · buzz from public StockTwits API · market data from Yahoo public chart endpoint · summaries from Claude. Reddit pending API approval. Not financial advice.
+  Phase 2 prototype · buzz from public StockTwits API · market data from Yahoo public chart endpoint · AI summaries via Claude or Gemini. Reddit pending API approval. Not financial advice.
 </footer>
 
 <!-- Right-edge sidebars (favorites + earnings) -->
@@ -1531,7 +1535,7 @@ TEMPLATE = """<!DOCTYPE html>
     const exp = m.explanation;
     const overviewHtml = exp && exp.overview
       ? `<div class="metrics-overview">${escapeHtml(exp.overview)}</div>`
-      : `<div class="metrics-overview empty">Click "Generate plain-English explanation" to have Claude explain these numbers as if you were 15.</div>`;
+      : `<div class="metrics-overview empty">Click "Generate plain-English explanation" to have AI explain these numbers as if you were 15.</div>`;
 
     // Build the Numbers column. Each row is clickable IF we have a per-metric
     // explanation for it (toggles inline expansion of that one sentence).
@@ -1579,7 +1583,7 @@ TEMPLATE = """<!DOCTYPE html>
       <div class="metrics-content">
         <div class="metrics-block-header">
           <button class="summary-gen-btn" data-metrics-action="explain"
-                  title="${exp ? 'Regenerate the plain-English explanation.' : 'Have Claude explain each metric as if you were 15.'}">
+                  title="${exp ? 'Regenerate the plain-English explanation.' : 'Have AI explain each metric as if you were 15.'}">
             ${actionLabel}
           </button>
           <span class="summary-status" data-metrics-status></span>
@@ -1619,7 +1623,7 @@ TEMPLATE = """<!DOCTYPE html>
     const originalLabel = btn.textContent.trim();
     btn.textContent = '⏳ Generating…';
     status.className = 'summary-status';
-    status.textContent = force_refresh ? 'Regenerating…' : 'Calling Claude (~15s)…';
+    status.textContent = force_refresh ? 'Regenerating…' : 'Calling AI (~15s)…';
 
     try {
       const resp = await fetch(`/metrics-explain/${encodeURIComponent(t.ticker)}`, {
@@ -1683,7 +1687,7 @@ TEMPLATE = """<!DOCTYPE html>
     const originalLabel = btn.textContent.trim();
     btn.textContent = '⏳ Generating…';
     status.className = 'summary-status';
-    status.textContent = force_refresh ? 'Regenerating…' : 'Calling Claude…';
+    status.textContent = force_refresh ? 'Regenerating…' : 'Calling AI…';
 
     try {
       const resp = await fetch(`/summarize/${encodeURIComponent(t.ticker)}`, {
@@ -2054,6 +2058,7 @@ TEMPLATE = """<!DOCTYPE html>
       const shortModel = (c.model || '').replace(/^.*claude-/, '').replace(/-\d{8}.*$/, '');
       const providerLabel = c.provider === 'bedrock' ? 'Bedrock' :
                             c.provider === 'anthropic' ? 'Anthropic' :
+                            c.provider === 'gemini' ? 'Gemini' :
                             c.provider === 'none' ? 'No AI' : c.provider;
       const finnhubBadge = c.finnhub_configured ? ' · 📊 Fundamentals' : '';
       pill.textContent = `${providerLabel} · ${shortModel || c.model || ''}${finnhubBadge}`;
@@ -2072,7 +2077,9 @@ TEMPLATE = """<!DOCTYPE html>
     // "none" → tell server to skip AI; otherwise pass model name as override.
     const body = (choice === 'none')
       ? {provider: 'none'}
-      : {model: choice};
+      : choice.startsWith('gemini')
+        ? {model: choice, provider: 'gemini'}
+        : {model: choice};
     // Always send favorites so the server can guarantee AI summaries for them
     // even if they're not in the top-N by buzz.
     body.favorites = Array.from(favorites);
@@ -2268,6 +2275,7 @@ def render_report(
     window_hours: int = BUZZ_WINDOW_HOURS,
     top_movers_n: int = 12,
 ) -> Path:
+    _init_explanations_table()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Timestamps for the freshness indicator. We surface two:

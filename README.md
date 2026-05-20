@@ -2,7 +2,7 @@
 
 A personal dashboard that surfaces which stocks people are actively
 discussing on social media, with live prices, fundamentals, earnings, and
-Claude-generated plain-English explanations of what the numbers mean.
+AI-generated plain-English explanations of what the numbers mean.
 
 Pulls aggregated buzz from **StockTwits** (real-time finance chatter with
 bullish/bearish sentiment), **Apewisdom** (Reddit aggregate across ~10
@@ -25,17 +25,18 @@ on `localhost:8765`.
 - 📅 Upcoming earnings sidebar sorted by next report date
 - 🔁 Background refresh button — non-blocking, live progress, page
   auto-reloads when done
-- Switchable AI provider (Anthropic API or AWS Bedrock) and model picker
-  (Opus / Sonnet / Haiku / no-AI)
+- Switchable AI provider (**Google Gemini**, Anthropic API, or AWS Bedrock)
+  and model picker in the toolbar
 - On-demand "Generate AI Summary" + "Explain these metrics like I'm 15"
   buttons in every modal
 - Server stop / restart from the UI
 
 ## Prerequisites
 
-- **Python 3.10+** (3.13 tested)
+- **Python 3.10+** (3.14 tested)
 - One of the following for AI summaries (you can run without AI too):
-  - **Anthropic API key** from https://console.anthropic.com (~$5 minimum credit)
+  - **Google Gemini API key** from https://aistudio.google.com/apikey (free tier available — recommended)
+  - **Anthropic API key** from https://console.anthropic.com
   - **AWS Bedrock** access with Claude models enabled in the Bedrock console
 - Optional but recommended: **Finnhub API key** (free) for fundamentals,
   market cap, P/E, earnings dates, and trusted-source news. Get one at
@@ -44,27 +45,45 @@ on `localhost:8765`.
 ## Setup (new machine)
 
 ```bash
-git clone https://github.com/<your-username>/stock-buzz.git
+git clone https://github.com/wosunkwo/stock-buzz.git
 cd stock-buzz
 ./setup.sh
 ```
 
 `setup.sh` creates a Python venv, installs dependencies, and copies
-`.env.example` to `.env`. Then edit `.env` to fill in your credentials:
+`.env.example` to `.env`. Then edit `.env` to fill in your credentials.
+
+### Path A — Google Gemini (recommended)
 
 ```bash
-# Required for AI summaries (pick ONE provider)
-ANTHROPIC_API_KEY=sk-ant-api03-...        # if using direct Anthropic API
-# OR
-STOCK_BUZZ_PROVIDER=bedrock                # if using AWS Bedrock
-AWS_PROFILE=your-aws-profile               # AWS profile must have Bedrock model access
+STOCK_BUZZ_PROVIDER=gemini
+GOOGLE_API_KEY=your_gemini_api_key
+
+# Optional: override the default model
+# Favorites tier default: gemini-2.5-flash
+# Bulk top-30 default:    gemini-2.0-flash
+STOCK_BUZZ_MODEL=gemini-2.5-flash
+
+FINNHUB_API_KEY=your_finnhub_key   # optional but recommended
+```
+
+Get a Gemini API key at https://aistudio.google.com/apikey — it's free and
+takes about 30 seconds.
+
+### Path B — Direct Anthropic API
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+FINNHUB_API_KEY=your_finnhub_key
+```
+
+### Path C — AWS Bedrock
+
+```bash
+STOCK_BUZZ_PROVIDER=bedrock
+AWS_PROFILE=your-aws-profile
 AWS_REGION=us-east-1
-
-# Optional but recommended
-FINNHUB_API_KEY=your_finnhub_key_here
-
-# Optional model override (defaults to claude-sonnet-4-6)
-STOCK_BUZZ_MODEL=claude-sonnet-4-6
+FINNHUB_API_KEY=your_finnhub_key
 ```
 
 `.env` is gitignored — you'll never accidentally commit your keys.
@@ -81,34 +100,37 @@ browser. Click **Refresh** to scrape and summarize. First run takes ~2-3
 minutes for the full pipeline; subsequent refreshes hit the cache aggressively
 and finish in ~30-60 seconds.
 
-### Convenient shell aliases (optional)
-
-If you'll use this regularly, add aliases to your `~/.zshrc` or `~/.bashrc`:
+### Convenient shell alias (optional)
 
 ```bash
-# Daily driver — Bedrock + Sonnet 4.6
-alias stock-buzz-server='cd ~/path/to/stock-buzz && source venv/bin/activate && \
-    STOCK_BUZZ_PROVIDER=bedrock AWS_PROFILE=YOUR_PROFILE AWS_REGION=us-east-1 \
-    STOCK_BUZZ_MODEL=claude-sonnet-4-6 python -m src.server'
-
-# Cheaper bulk via Haiku
-alias stock-buzz-server-haiku='cd ~/path/to/stock-buzz && source venv/bin/activate && \
-    STOCK_BUZZ_PROVIDER=bedrock AWS_PROFILE=YOUR_PROFILE AWS_REGION=us-east-1 \
-    STOCK_BUZZ_MODEL=claude-haiku-4-5 python -m src.server'
+alias stock-buzz='cd ~/path/to/stock-buzz && source venv/bin/activate && python -m src.server'
 ```
 
-Then `stock-buzz-server` from any terminal starts the dashboard.
+Then `stock-buzz` from any terminal starts the dashboard.
 
 ## Cost
 
-With Bedrock + Sonnet 4.6 (default):
-- Per refresh: ~$0.005–$0.02 (most calls hit the cache after the first run)
-- On-demand "Generate Summary" button: ~$0.005 (Haiku) / ~$0.02 (Sonnet) /
-  ~$0.10 (Opus)
-- Bedrock and Anthropic API charge identical per-token rates for Claude
+### Google Gemini (default provider)
 
-If cost matters more than max quality, set `STOCK_BUZZ_MODEL=claude-haiku-4-5`
-in `.env` for ~5x savings.
+| Model | Per refresh (30 tickers) | Notes |
+|---|---|---|
+| `gemini-2.0-flash` | ~$0.004 | Bulk default — cheapest |
+| `gemini-2.5-flash` | ~$0.008 | Favorites default — balanced |
+| `gemini-2.5-pro` | ~$0.06 | Highest quality |
+
+Free tier: 15 requests/minute, 1,500 requests/day. The pipeline serializes
+Gemini calls and paces them to stay within the RPM limit.
+
+### Claude (Anthropic / Bedrock)
+
+| Model | Per refresh | Notes |
+|---|---|---|
+| `claude-haiku-4-5` | ~$0.005 | Cheapest Claude |
+| `claude-sonnet-4-6` | ~$0.02 | Balanced |
+| `claude-opus-4-7` | ~$0.10 | Highest quality |
+
+Most calls hit the SQLite cache after the first run, so day-to-day cost is
+much lower than cold-run estimates.
 
 ## Configuration reference
 
@@ -116,11 +138,20 @@ All knobs live in `.env` (loaded automatically) or as shell exports.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `STOCK_BUZZ_PROVIDER` | auto-detect | `anthropic`, `bedrock`, or `none` (skip AI) |
-| `STOCK_BUZZ_MODEL` | `claude-sonnet-4-6` | Claude model alias for favorites + on-demand calls |
+| `STOCK_BUZZ_PROVIDER` | auto-detect | `gemini`, `anthropic`, `bedrock`, or `none` |
+| `STOCK_BUZZ_MODEL` | provider-dependent | Model for favorites + on-demand calls |
+| `GOOGLE_API_KEY` | unset | Required for Gemini provider |
 | `ANTHROPIC_API_KEY` | unset | Required for direct Anthropic API |
 | `AWS_PROFILE` / `AWS_REGION` | unset | Required for Bedrock |
 | `FINNHUB_API_KEY` | unset | Unlocks fundamentals + earnings + news |
+
+**Model defaults by provider:**
+- `gemini` → favorites: `gemini-2.5-flash`, bulk: `gemini-2.0-flash`
+- `anthropic` / `bedrock` → `claude-opus-4-7`
+
+The toolbar model picker lets you override the model for a single refresh
+without touching `.env`. Picking a Gemini model automatically routes to the
+Gemini provider regardless of your `.env` setting.
 
 ## Architecture
 
@@ -137,7 +168,7 @@ All knobs live in `.env` (loaded automatically) or as shell exports.
 │               │  (Yahoo + Finnhub)│  (Finnhub)         │      │
 │               └────────┬──────────┴────────────────────┘      │
 │                        ▼                                       │
-│ AI            Claude summaries (top-N + favorites, parallel)   │
+│ AI            Gemini / Claude summaries (top-N + favorites)   │
 │ Layer         Metrics explainer (favorites)                    │
 │                        │                                       │
 │                        ▼                                       │
@@ -158,7 +189,7 @@ Source files in `src/`:
 - `scoring.py` — buzz score
 - `market_data.py` — Yahoo + Finnhub fundamentals
 - `earnings.py` — earnings + trusted news
-- `summarizer.py` — Claude summaries (provider-agnostic)
+- `summarizer.py` — AI summaries (Gemini, Anthropic, or Bedrock)
 - `metrics_explainer.py` — plain-English metrics explanation
 - `sectors.py` — ticker-to-sector mapping
 - `report.py` — Jinja2 dashboard rendering
@@ -167,6 +198,13 @@ Source files in `src/`:
 - `config.py` — paths and constants
 
 ## Troubleshooting
+
+**Gemini 429 RESOURCE_EXHAUSTED** — you've hit the free-tier rate limit (15
+req/min or 1,500 req/day). The pipeline serializes calls and retries with
+backoff, but if the daily quota is exhausted you'll need to wait for it to
+reset (midnight Pacific) or generate a new API key in a fresh Google Cloud
+project. Enabling billing on your project unlocks higher quotas without
+charging for typical personal use.
 
 **"AWS Bedrock client could not be created"** — your `AWS_PROFILE` likely
 isn't authenticating. Run `aws sts get-caller-identity --profile YOUR_PROFILE`
@@ -193,7 +231,7 @@ aggregated mentions) as a structured stand-in.
 
 - All data is stored locally in SQLite (`data/buzz.db`) — never sent anywhere
 - API keys live in `.env` only; never logged or transmitted except to the
-  intended provider (Anthropic/Bedrock/Finnhub)
+  intended provider (Gemini/Anthropic/Bedrock/Finnhub)
 - The dashboard is bound to `127.0.0.1` only — not accessible from other
   machines on your network unless you change the host
 

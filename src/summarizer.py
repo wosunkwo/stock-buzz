@@ -1,10 +1,11 @@
-"""Per-ticker Claude summarization.
+"""Per-ticker AI summarization.
 
-Supports two LLM provider paths, selected by env var:
-- STOCK_BUZZ_PROVIDER=anthropic  → direct Anthropic API (default)
+Supports three LLM provider paths, selected by env var:
+- STOCK_BUZZ_PROVIDER=anthropic  → direct Anthropic API
 - STOCK_BUZZ_PROVIDER=bedrock    → AWS Bedrock (uses your AWS credentials)
+- STOCK_BUZZ_PROVIDER=gemini     → Google Gemini direct API (uses GOOGLE_API_KEY)
 
-For each top buzzy ticker, ask Claude to produce four sections:
+For each top buzzy ticker, ask the LLM to produce four sections:
 - ELI15: explain like the reader is 15 — what the company does and why people are buzzing
 - standard: a normal financial-news-style summary
 - bull_case: why bulls think this goes up
@@ -159,6 +160,7 @@ def _fingerprint(buzz: TickerBuzz, model: str = "") -> str:
         if "opus" in m: model_tier = "opus"
         elif "sonnet" in m: model_tier = "sonnet"
         elif "haiku" in m: model_tier = "haiku"
+        elif "gemini" in m: model_tier = m  # full name: 2.0-flash ≠ 2.5-flash ≠ 2.5-pro
         else: model_tier = "other"
 
     h.update(
@@ -210,6 +212,10 @@ def _save(summary: Summary, fingerprint: str, db_path: Path = DB_PATH) -> None:
 # Default direct-API model. Override per-call or via STOCK_BUZZ_MODEL env var.
 DEFAULT_DIRECT_MODEL = "claude-opus-4-7"
 
+# Gemini defaults — used when provider=gemini and no STOCK_BUZZ_MODEL override.
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"       # favorites tier
+GEMINI_DEFAULT_BULK_MODEL = "gemini-2.0-flash"  # bulk top-N tier
+
 # Map direct-API model IDs to their Bedrock equivalents. Bedrock uses
 # "cross-region inference profiles" prefixed with `us.` for the same model
 # in us-east-1/us-west-2 routing. If the user passes a value not in this map,
@@ -226,7 +232,7 @@ DIRECT_TO_BEDROCK_MODEL = {
 def _resolve_provider() -> str:
     """Return 'bedrock', 'anthropic', or 'none' based on env config."""
     provider = os.environ.get("STOCK_BUZZ_PROVIDER", "").strip().lower()
-    if provider in ("bedrock", "anthropic", "none"):
+    if provider in ("bedrock", "anthropic", "gemini", "none"):
         return provider
     # Default: prefer direct API if a key is present; else try Bedrock.
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -236,6 +242,10 @@ def _resolve_provider() -> str:
 
 def _resolve_model(provider: str, override: Optional[str] = None) -> str:
     """Translate the requested model name into the right ID for the chosen provider."""
+    if provider == "gemini":
+        # Gemini model names pass through verbatim. Use Gemini-specific default
+        # so an unset STOCK_BUZZ_MODEL doesn't return a Claude model name.
+        return override or os.environ.get("STOCK_BUZZ_MODEL") or GEMINI_DEFAULT_MODEL
     base = override or os.environ.get("STOCK_BUZZ_MODEL") or DEFAULT_DIRECT_MODEL
     if provider == "bedrock":
         # If the caller already gave us a Bedrock-shaped ID (contains a dot or
@@ -248,6 +258,18 @@ def _resolve_model(provider: str, override: Optional[str] = None) -> str:
 
 def _make_client(provider: str):
     """Construct the SDK client for the chosen provider. Returns None on failure."""
+    if provider == "gemini":
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            print("  GOOGLE_API_KEY not set — skipping summaries.")
+            return None
+        try:
+            from google import genai
+            return genai.Client(api_key=api_key)
+        except ImportError:
+            print("  google-genai not installed — run: pip install google-genai")
+            return None
+
     try:
         import anthropic
     except ImportError:
@@ -330,6 +352,37 @@ def _build_user_message(buzz: TickerBuzz, market: Optional[MarketData]) -> str:
     return "\n".join(lines)
 
 
+def _call_gemini_summary(client, model_name: str, buzz: TickerBuzz,
+                         market: Optional[MarketData]) -> Optional[dict]:
+    """Call Gemini API for a summary. Retries on 429 rate-limit with backoff."""
+    import json
+    from google.genai import types
+    user_msg = _build_user_message(buzz, market)
+    user_msg += ("\n\nReturn a JSON object with exactly these four string keys: "
+                 "eli15, standard, bull_case, bear_case.")
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                ),
+            )
+            result = json.loads(response.text)
+            time.sleep(4)  # pace to stay under 15 RPM free-tier limit
+            return result
+        except Exception as e:
+            if "429" in str(e) and attempt < 3:
+                wait = (2 ** attempt) * 10  # 10s, 20s, 40s
+                print(f"    {buzz.ticker}: Gemini 429 — retrying in {wait}s (attempt {attempt + 1}/3)")
+                time.sleep(wait)
+                continue
+            print(f"    {buzz.ticker}: Gemini summary failed: {type(e).__name__}: {str(e)[:200]}")
+            return None
+
+
 def summarize_ticker(
     buzz: TickerBuzz,
     market: Optional[MarketData],
@@ -358,6 +411,22 @@ def summarize_ticker(
         client = _make_client(provider)
         if client is None:
             return None
+
+    if provider == "gemini":
+        data = _call_gemini_summary(client, resolved_model, buzz, market)
+        if data is None:
+            return None
+        summary = Summary(
+            ticker=buzz.ticker,
+            eli15=data.get("eli15", ""),
+            standard=data.get("standard", ""),
+            bull_case=data.get("bull_case", ""),
+            bear_case=data.get("bear_case", ""),
+            model=f"gemini:{resolved_model}",
+            fetched_at=time.time(),
+        )
+        _save(summary, fingerprint, db_path)
+        return summary
 
     try:
         # We don't enable adaptive thinking here because the API rejects thinking
@@ -442,8 +511,8 @@ def summarize_top_tickers(
     The user can disable the two-tier behavior by passing `bulk_model=model`,
     in which case all summaries use the same model.
 
-    Concurrency: up to `max_concurrent` simultaneous Claude calls. Bedrock
-    handles ~5-10 concurrent reasonably; Anthropic direct API is fine too.
+    Concurrency: up to `max_concurrent` simultaneous LLM calls. Bedrock
+    handles ~5-10 concurrent reasonably; Anthropic and Gemini direct APIs are fine too.
     """
     if provider is None:
         provider = _resolve_provider()
@@ -453,14 +522,19 @@ def summarize_top_tickers(
             print("  STOCK_BUZZ_PROVIDER=none — skipping summaries.")
         return {}
 
+    init_summaries_table(db_path)
+
     favorite_resolved = _resolve_model(provider, override=model)
-    bulk_resolved = _resolve_model(provider, override=bulk_model or DEFAULT_BULK_MODEL)
+    _bulk_default = GEMINI_DEFAULT_BULK_MODEL if provider == "gemini" else DEFAULT_BULK_MODEL
+    bulk_resolved = _resolve_model(provider, override=bulk_model or _bulk_default)
 
     client = _make_client(provider)
     if client is None:
         if verbose:
             if provider == "anthropic":
                 print("  ANTHROPIC_API_KEY not set — skipping summaries.")
+            elif provider == "gemini":
+                print("  GOOGLE_API_KEY not set or google-generativeai not installed — skipping summaries.")
             else:
                 print("  AWS Bedrock client could not be created — skipping summaries.")
         return {}

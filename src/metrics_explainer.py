@@ -1,6 +1,6 @@
 """Generate plain-English explanations of stock fundamental metrics.
 
-Audience: a 15-year-old. The Claude prompt is tuned to:
+Audience: a 15-year-old. The AI prompt is tuned to:
 - Define each metric in plain words BEFORE giving the value
 - Tell the user whether THIS company's number looks good/bad/normal
   for its sector/peers, with concrete reference points
@@ -250,6 +250,38 @@ def _save(exp: MetricsExplanation, fingerprint: str, db_path: Path = DB_PATH) ->
         )
 
 
+def _call_gemini_explanation(client, model_name: str, md: MarketData) -> Optional[dict]:
+    """Call Gemini API for a metrics explanation. Retries on 429 with backoff."""
+    import json
+    import time
+    from google.genai import types
+    user_msg = _make_user_message(md)
+    user_msg += ("\n\nReturn a JSON object with exactly two keys: "
+                 "'overview' (string) and 'per_metric' (object mapping metric_key to "
+                 "a one-sentence plain-English explanation).")
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                ),
+            )
+            result = json.loads(response.text)
+            time.sleep(4)
+            return result
+        except Exception as e:
+            if "429" in str(e) and attempt < 3:
+                wait = (2 ** attempt) * 10  # 10s, 20s, 40s
+                print(f"    {md.ticker}: Gemini 429 — retrying in {wait}s (attempt {attempt + 1}/3)")
+                time.sleep(wait)
+                continue
+            print(f"    {md.ticker}: Gemini metrics explain failed: {type(e).__name__}: {str(e)[:200]}")
+            return None
+
+
 def explain_metrics(
     md: MarketData,
     client=None,
@@ -289,6 +321,23 @@ def explain_metrics(
         client = _make_client(provider)
         if client is None:
             return None
+
+    if provider == "gemini":
+        data = _call_gemini_explanation(client, resolved_model, md)
+        if data is None:
+            return None
+        per_metric = data.get("per_metric") or {}
+        if not isinstance(per_metric, dict):
+            per_metric = {}
+        exp = MetricsExplanation(
+            ticker=md.ticker,
+            overview=str(data.get("overview", "")),
+            per_metric={str(k): str(v) for k, v in per_metric.items()},
+            model=f"gemini:{resolved_model}",
+            fetched_at=time.time(),
+        )
+        _save(exp, fingerprint, db_path)
+        return exp
 
     try:
         # Same shape as summarizer: forced-tool-use to get structured output

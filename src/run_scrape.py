@@ -10,7 +10,7 @@ Sources:
   → score buzz
   → fetch live market data for ALL ranked tickers
   → fetch earnings + trusted-source news for top N
-  → Claude-summarize top N + favorites
+  → AI-summarize top N + favorites (Claude or Gemini, per provider config)
   → render the dashboard
 
 Run from CLI:
@@ -338,15 +338,20 @@ def main(progress_cb: Optional[ProgressCb] = None) -> int:
 
     summarize_count = TOP_N_FOR_SUMMARY + len([f for f in favorites if f not in {b.ticker for b in buzz[:TOP_N_FOR_SUMMARY]}])
     cb("summarize", f"Generating AI summaries for top {TOP_N_FOR_SUMMARY} + {len(favorites)} favorites…", 0.55)
-    print(f"\nGenerating Claude summaries for top {TOP_N_FOR_SUMMARY} tickers + {len(favorites)} favorites...")
+    from .summarizer import _resolve_provider
+    _prov = _resolve_provider().capitalize()
+    print(f"\nGenerating {_prov} summaries for top {TOP_N_FOR_SUMMARY} tickers + {len(favorites)} favorites...")
 
     # Wrap summarize_top_tickers with a per-ticker progress callback by patching
     # its verbose printf to also call our progress hook. Simplest path: count
     # summaries by polling the dict afterward isn't useful — instead we let
     # summarize_top_tickers do its thing and just send a high-level update at
     # the end. This keeps the summarizer module untouched.
+    from .summarizer import _resolve_provider as _rp
+    _max_concurrent = 1 if _rp() == "gemini" else 5  # Gemini free tier: 15 RPM → serialize
     summaries = summarize_top_tickers(buzz, market_data, top_n=TOP_N_FOR_SUMMARY,
-                                      progress_cb=cb, extra_tickers=favorites)
+                                      progress_cb=cb, extra_tickers=favorites,
+                                      max_concurrent=_max_concurrent)
 
     # Auto-generate metrics-explainer for each favorite so the modal shows the
     # plain-English explanation immediately on open (no on-demand click). We
